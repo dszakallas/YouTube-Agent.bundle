@@ -366,7 +366,7 @@ def test_update_grouping_folder_becomes_collection(scenario):
     assert metadata.studio == "YouTube"
     assert scenario.call_counts() == {
         "json": 0,
-        "http": 0,
+        "http": 1,  # the remote .info.json thumbnail, since there is no local image
         "storage": 1,
         "os.walk": 1,
         "os.listdir": 1,
