@@ -211,8 +211,14 @@ def channel_body(
     banner=None,
     poster=None,
     statistics=None,
+    uploads_playlist=None,
 ):
-    """A ``channels`` endpoint item."""
+    """A ``channels`` endpoint item.
+
+    ``uploads_playlist`` fills ``contentDetails.relatedPlaylists.uploads``; when
+    it is omitted the payload has no ``contentDetails`` at all, which is the
+    shape that forces the ``search.list`` fallback.
+    """
     snippet = {"title": title, "description": description}
     if country is not None:
         snippet["country"] = country
@@ -223,6 +229,8 @@ def channel_body(
         body["statistics"] = statistics
     if banner is not None:
         body["brandingSettings"] = {"image": {"bannerTvLowImageUrl": banner}}
+    if uploads_playlist is not None:
+        body["contentDetails"] = {"relatedPlaylists": {"uploads": uploads_playlist}}
     return body
 
 

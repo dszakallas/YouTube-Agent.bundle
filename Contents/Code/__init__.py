@@ -545,7 +545,12 @@ def _update(metadata, media, lang, force, movie):
     if channel_id.startswith('UC') or channel_id.startswith('HC'):
       try:
         json_channel_details  = json_load(YOUTUBE_CHANNEL_DETAILS, channel_id)['items'][0]
-        json_channel_items    = json_load(YOUTUBE_CHANNEL_ITEMS, channel_id)
+        #channels already return the uploads playlist: playlistItems costs 1 quota unit/page and has no 500-result cap
+        uploads_playlist_id   = Dict(json_channel_details, 'contentDetails', 'relatedPlaylists', 'uploads')
+        if uploads_playlist_id:
+          json_channel_items  = json_load(YOUTUBE_PLAYLIST_ITEMS, uploads_playlist_id)
+        else:
+          json_channel_items  = json_load(YOUTUBE_CHANNEL_ITEMS, channel_id)
       except Exception as e:  Log('exception: {}, url: {}'.format(e, guid))
       else:
         
