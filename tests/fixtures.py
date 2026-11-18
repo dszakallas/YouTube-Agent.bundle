@@ -301,9 +301,11 @@ def video_body(
             "categoryId": category_id,
             "tags": list(tags),
             "thumbnails": {
+                "default": {"url": "https://i.ytimg.com/vi/%s/default.jpg" % video_id},
+                "medium": {"url": "https://i.ytimg.com/vi/%s/mqdefault.jpg" % video_id},
                 "maxres": {
                     "url": thumbnail or "https://i.ytimg.com/vi/%s/maxresdefault.jpg" % video_id,
-                }
+                },
             },
         },
         "contentDetails": {"duration": duration},
@@ -451,8 +453,8 @@ class Scenario(object):
         metadata.id = "youtube|%s|%s" % (guid, series_folder)
         return metadata
 
-    def update(self, metadata, media):
-        return self.module.Update(metadata, media, "en", False, False)
+    def update(self, metadata, media, movie=False):
+        return self.module.Update(metadata, media, "en", False, movie)
 
     def search(self, media):
         results = plex_stubs.SearchResults()
