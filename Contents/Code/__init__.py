@@ -5,6 +5,8 @@ import sys                  # getdefaultencoding, getfilesystemencoding, platfor
 import os                   # path.abspath, join, dirname
 import re                   #
 import inspect              # getfile, currentframe
+import threading            # in-flight guard for concurrent Update() calls
+import contextlib           # contextmanager for the in-flight guard
 import urllib2              #
 from   lxml    import etree #
 from   io      import open  # open
@@ -249,11 +251,42 @@ def Search(results, media, lang, manual, movie):
   results.Append( MetadataSearchResult( id=safe_id, name=os.path.basename(filename), year=None, score=80, lang=lang ) )
   Log(''.ljust(157, '='))
 
+### Skip duplicate concurrent updates #################################################################################################################################
+# Plex can re-issue update(force=True) for a series while an earlier Update() is still running. Scanning the
+# same series twice at once multiplies API calls and can hold a whole show folder in memory, so a duplicate
+# caller returns immediately instead of waiting for the first one.
+_UPDATE_LOCK = threading.Lock()
+_UPDATES_IN_FLIGHT = set()
+
+@contextlib.contextmanager
+def update_guard(key):
+  """Yield True for the first caller of key, False while another caller still holds it."""
+  with _UPDATE_LOCK:
+    duplicate = key in _UPDATES_IN_FLIGHT
+    if not duplicate:
+      _UPDATES_IN_FLIGHT.add(key)
+  if duplicate:
+    yield False
+    return
+  try:
+    yield True
+  finally:
+    with _UPDATE_LOCK:
+      _UPDATES_IN_FLIGHT.discard(key)
+
 ### Download metadata using unique ID ###
 def Update(metadata, media, lang, force, movie):
   # Sanitize metadata.id to prevent XML errors
   if hasattr(metadata, 'id'):
     metadata.id = sanitize_xml_string(metadata.id)
+  key = (bool(movie), getattr(metadata, 'id', u''))
+  with update_guard(key) as acquired:
+    if not acquired:
+      Log.Info(u'update() - skipping concurrent update for: "{}"'.format(key[1]))
+      return
+    _update(metadata, media, lang, force, movie)
+
+def _update(metadata, media, lang, force, movie):
   Log(u'=== update(lang={}, force={}, movie={}) ==='.format(lang, force, movie))
   temp1, guid, series_folder = metadata.id.split("|")
   dir                        = sanitize_path(GetMediaDir(media, movie))
