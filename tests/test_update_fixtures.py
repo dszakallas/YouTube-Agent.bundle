@@ -316,35 +316,29 @@ def test_update_playlist_series_offline(scenario):
 
 def test_update_uses_crowd_sourced_title(scenario):
     scenario.stubs.prefs["use_crowd_sourced_titles"] = True
-    scenario.api.add_channel_details(
-        CHANNEL_ID,
-        fixtures.channel_body(CHANNEL_ID, title="Test Channel", description="Channel description"),
-    )
-    scenario.api.add_channel_videos(CHANNEL_ID, [])
-    scenario.api.add_dearrow(CHANNEL_ID, fixtures.dearrow_body(CHANNEL_ID, "Crowd Title"))
-
-    series = scenario.library.add_series("Test Channel", layout="flat")
-    series.add_episode(
-        "Only Video",
+    scenario.api.add_video(
         "fffffffffff",
-        info_json=fixtures.youtube_info("fffffffffff", "Only Video"),
+        fixtures.video_body("fffffffffff", title="Only Video", description="Only summary"),
     )
+    scenario.api.add_dearrow("fffffffffff", fixtures.dearrow_body("fffffffffff", "Crowd Title"))
+    media = plex_stubs.movie_media(
+        name="Only Video",
+        file=str(scenario.library.root / "movies" / "Only Video [fffffffffff].mp4"),
+    )
+    metadata = scenario.metadata("fffffffffff")
 
-    scenario.register_library()
-    metadata = scenario.metadata(CHANNEL_ID, series)
-
-    scenario.update(metadata, series.media())
+    scenario.update(metadata, media, movie=True)
     stubs = scenario.stubs
 
     assert stubs.json.calls.args() == (
-        CHANNELS_URL.format(CHANNEL_ID, API_KEY),
-        CHANNEL_ITEMS_URL.format(CHANNEL_ID, API_KEY),
-        dearrow_url(CHANNEL_ID),
+        VIDEOS_URL.format("fffffffffff", API_KEY),
+        dearrow_url("fffffffffff"),
     )
     assert metadata.title == "Crowd Title"
-    assert metadata.summary == "Original Title: Test Channel\r\n\r\nChannel description"
+    assert metadata.original_title == "Only Video"
+    assert metadata.summary == "Original Title: Only Video\r\n\r\nOnly summary"
     assert stubs.http.CacheTime == plex_stubs.CACHE_1MONTH
-    assert metadata.seasons["1"].episodes["e001"].title == "Only Video"
+    assert stubs.log.errors == []
 
 
 def test_update_grouping_folder_becomes_collection(scenario):

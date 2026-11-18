@@ -260,8 +260,10 @@ class JSON(object):
     def url_calls(self):
         return list(self.calls.args(0))
 
-    def ObjectFromURL(self, url):
-        self.calls.record(url)
+    def ObjectFromURL(self, url, **kwargs):
+        # Plex's JSON.ObjectFromURL accepts options such as cacheTime; the
+        # keyword arguments are part of what the plugin is asserting on.
+        self.calls.record(url, **kwargs)
         if self.before_response is not None:
             self.before_response(url)
         if url in self.responses:
@@ -589,6 +591,7 @@ class Stubs(object):
         self.results = SearchResults()
         self.metadata = Metadata()
         self.urlopen_calls = []
+        self.urlopen_kwargs = []
         self.isfile_calls = []
         self.urllib2 = self._build_urllib2()
 
@@ -601,6 +604,7 @@ class Stubs(object):
 
         def urlopen(url, *args, **kwargs):
             stubs.urlopen_calls.append(url)
+            stubs.urlopen_kwargs.append(kwargs)
             raise RuntimeError(OFFLINE_ERROR)
 
         module.urlopen = urlopen
