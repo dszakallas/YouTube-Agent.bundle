@@ -85,14 +85,14 @@ def test_duplicate_concurrent_update_is_skipped(scenario):
         assert 'update() - skipping concurrent update for: "%s"' % metadata_b.id in (
             scenario.stubs.log.messages
         )
-        assert scenario.module._UPDATES_IN_FLIGHT == {(False, metadata_a.id)}
+        assert scenario.module.UPDATES_IN_FLIGHT == {(False, metadata_a.id)}
     finally:
         hook.release.set()
         worker_a.join(timeout=10)
 
     assert worker_a.is_alive() is False
     assert errors == []
-    assert scenario.module._UPDATES_IN_FLIGHT == set()
+    assert scenario.module.UPDATES_IN_FLIGHT == set()
     assert metadata_a.title == "Test Channel"
     assert metadata_a.summary == "Test Channel description"
     assert metadata_a.seasons["1"].episodes["e001"].title == "First Video"
@@ -121,7 +121,7 @@ def test_different_series_run_concurrently(scenario):
         assert metadata_y.title == "Channel Y"
         assert metadata_y.seasons["1"].episodes["e001"].title == "Y Video"
         assert metadata_x.title == parked_title(series_x)
-        assert scenario.module._UPDATES_IN_FLIGHT == {(False, metadata_x.id)}
+        assert scenario.module.UPDATES_IN_FLIGHT == {(False, metadata_x.id)}
     finally:
         hook.release.set()
         worker_x.join(timeout=10)
@@ -130,7 +130,7 @@ def test_different_series_run_concurrently(scenario):
     assert errors == []
     assert metadata_x.title == "Channel X"
     assert metadata_x.seasons["1"].episodes["e001"].title == "X Video"
-    assert scenario.module._UPDATES_IN_FLIGHT == set()
+    assert scenario.module.UPDATES_IN_FLIGHT == set()
     assert scenario.call_counts() == {
         "json": 4,
         "http": 2,  # one remote .info.json thumbnail per series
@@ -152,11 +152,11 @@ def test_exception_releases_the_guard(scenario):
     metadata = scenario.metadata(MOVIE_VIDEO_ID, series)
     broken_media = plex_stubs.MediaContainer(name="Broken")
 
-    # A media object with no items raises IndexError inside _update().
+    # A media object with no items raises IndexError inside perform_update().
     with pytest.raises(IndexError):
         scenario.update(metadata, broken_media, movie=True)
 
-    assert scenario.module._UPDATES_IN_FLIGHT == set()
+    assert scenario.module.UPDATES_IN_FLIGHT == set()
 
     retry = scenario.metadata(MOVIE_VIDEO_ID, series)
     movie_media = plex_stubs.movie_media(name="Movie", file=str(series.episodes[0].path))
@@ -167,7 +167,7 @@ def test_exception_releases_the_guard(scenario):
     assert retry.duration == 754000
     assert retry.year == 2024
     assert retry.genres == ["Music"]
-    assert scenario.module._UPDATES_IN_FLIGHT == set()
+    assert scenario.module.UPDATES_IN_FLIGHT == set()
     assert scenario.stubs.json.calls.count == 1
 
 
@@ -203,7 +203,7 @@ def test_movie_and_tv_with_the_same_id_do_not_collide(scenario):
         assert metadata_movie.title == "Movie Title"
         assert metadata_movie.summary == "Movie summary"
         assert metadata_tv.title == parked_title(series)
-        assert scenario.module._UPDATES_IN_FLIGHT == {(False, metadata_tv.id)}
+        assert scenario.module.UPDATES_IN_FLIGHT == {(False, metadata_tv.id)}
     finally:
         hook.release.set()
         worker_tv.join(timeout=10)
@@ -212,5 +212,5 @@ def test_movie_and_tv_with_the_same_id_do_not_collide(scenario):
     assert errors == []
     assert metadata_tv.title == "Test Channel"
     assert metadata_tv.seasons["1"].episodes["e001"].title == "TV Episode"
-    assert scenario.module._UPDATES_IN_FLIGHT == set()
+    assert scenario.module.UPDATES_IN_FLIGHT == set()
     assert scenario.stubs.json.calls.count == 3

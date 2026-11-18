@@ -6,7 +6,6 @@ import os                   # path.abspath, join, dirname
 import re                   #
 import inspect              # getfile, currentframe
 import threading            # in-flight guard for concurrent Update() calls
-import contextlib           # contextmanager for the in-flight guard
 import urllib2              #
 from   lxml    import etree #
 from   io      import open  # open
@@ -87,7 +86,7 @@ def ISO8601DurationToSeconds(duration):
   else:    return 3600 * js_int(match[0]) + 60 * js_int(match[1]) + js_int(match[2])
 
 ### Parse a date the API may omit or garble ###
-def _safe_parse_date(value):
+def safe_parse_date(value):
   """Datetime.ParseDate, but None instead of raising when the field is missing or unparseable."""
   if not value:  return None
   try:   return Datetime.ParseDate(value)
@@ -283,24 +282,27 @@ def Search(results, media, lang, manual, movie):
 # Plex can re-issue update(force=True) for a series while an earlier Update() is still running. Scanning the
 # same series twice at once multiplies API calls and can hold a whole show folder in memory, so a duplicate
 # caller returns immediately instead of waiting for the first one.
-_UPDATE_LOCK = threading.Lock()
-_UPDATES_IN_FLIGHT = set()
+UPDATE_LOCK = threading.Lock()
+UPDATES_IN_FLIGHT = set()
 
-@contextlib.contextmanager
-def update_guard(key):
-  """Yield True for the first caller of key, False while another caller still holds it."""
-  with _UPDATE_LOCK:
-    duplicate = key in _UPDATES_IN_FLIGHT
-    if not duplicate:
-      _UPDATES_IN_FLIGHT.add(key)
-  if duplicate:
-    yield False
-    return
+def acquire_update(key):
+  """Record key as in-flight and return True, or return False if another caller holds it."""
+  UPDATE_LOCK.acquire()
   try:
-    yield True
+    if key in UPDATES_IN_FLIGHT:
+      return False
+    UPDATES_IN_FLIGHT.add(key)
+    return True
   finally:
-    with _UPDATE_LOCK:
-      _UPDATES_IN_FLIGHT.discard(key)
+    UPDATE_LOCK.release()
+
+def release_update(key):
+  """Release an in-flight key."""
+  UPDATE_LOCK.acquire()
+  try:
+    UPDATES_IN_FLIGHT.discard(key)
+  finally:
+    UPDATE_LOCK.release()
 
 ### Episode matching indexes ############################################################################################################################
 # The episode loop used to walk the series folder for every episode and re-scan every API item for every episode.
@@ -309,18 +311,18 @@ VIDEO_ID_LENGTH = 11
 
 class VideoIndex(dict):
   """videoId -> (position, item). Ids that are not 11 characters are listed for the fallback probe."""
-  def __init__(self):
-    dict.__init__(self)
-    self.odd_length_ids = []
+  odd_length_ids = ()
 
 def build_video_index(items):
   """Index API items by videoId, keeping the first occurrence exactly like a linear scan does."""
   index = VideoIndex()
+  odd_ids = []
   for position, video in enumerate(items or []):
     videoId = Dict(video, 'id', 'videoId') or Dict(video, 'snippet', 'resourceId', 'videoId')
     if not videoId or videoId in index:  continue
     index[videoId] = (position, video)
-    if len(videoId) != VIDEO_ID_LENGTH:  index.odd_length_ids.append(videoId)
+    if len(videoId) != VIDEO_ID_LENGTH:  odd_ids.append(videoId)
+  if odd_ids:  index.odd_length_ids = tuple(odd_ids)
   return index
 
 def match_video(index, filename):
@@ -364,13 +366,15 @@ def Update(metadata, media, lang, force, movie):
   if hasattr(metadata, 'id'):
     metadata.id = sanitize_xml_string(metadata.id)
   key = (bool(movie), getattr(metadata, 'id', u''))
-  with update_guard(key) as acquired:
-    if not acquired:
-      Log.Info(u'update() - skipping concurrent update for: "{}"'.format(key[1]))
-      return
-    _update(metadata, media, lang, force, movie)
+  if not acquire_update(key):
+    Log.Info(u'update() - skipping concurrent update for: "{}"'.format(key[1]))
+    return
+  try:
+    perform_update(metadata, media, lang, force, movie)
+  finally:
+    release_update(key)
 
-def _update(metadata, media, lang, force, movie):
+def perform_update(metadata, media, lang, force, movie):
   Log(u'=== update(lang={}, force={}, movie={}) ==='.format(lang, force, movie))
   temp1, guid, series_folder = metadata.id.split("|")
   dir                        = sanitize_path(GetMediaDir(media, movie))
@@ -421,7 +425,7 @@ def _update(metadata, media, lang, force, movie):
 
         metadata.duration                = Dict(json_video_details, 'duration');                               Log(u'series duration:    "{}"->"{}"'.format(Dict(json_video_details, 'duration'), metadata.duration))
         metadata.genres                  = Dict(json_video_details, 'categories');                             Log(u'genres: '+str([x for x in metadata.genres]))
-        date                             = _safe_parse_date(Dict(json_video_details, 'upload_date'));          Log(u'date:  "{}"'.format(date))
+        date                             = safe_parse_date(Dict(json_video_details, 'upload_date'));          Log(u'date:  "{}"'.format(date))
         if date is not None:  metadata.originally_available_at = date.date()
         if date is not None:  metadata.year = date.year  #test avoid:  AttributeError: 'TV_Show' object has no attribute named 'year'
         thumb                            = get_thumb(json_video_details)
@@ -447,7 +451,7 @@ def _update(metadata, media, lang, force, movie):
     except:  Log(u'json_video_details - Could not retrieve data from YouTube for: ' + guid)
     else:
       Log('Movie mode - json_video_details - Loaded video details from: "{}"'.format(YOUTUBE_json_video_details.format(guid, 'personal_key')))
-      date                             = _safe_parse_date(Dict(json_video_details, 'snippet', 'publishedAt'));  Log('date:  "{}"'.format(date))
+      date                             = safe_parse_date(Dict(json_video_details, 'snippet', 'publishedAt'));  Log('date:  "{}"'.format(date))
       if date is not None:  metadata.originally_available_at = date.date()
       metadata.title                   = json_video_details['snippet']['title'];                                                      Log(u'series title:       "{}"'.format(json_video_details['snippet']['title']))
       metadata.summary                 = json_video_details['snippet']['description'];                                                Log(u'series description: '+json_video_details['snippet']['description'].replace('\n', '. '))
@@ -526,7 +530,7 @@ def _update(metadata, media, lang, force, movie):
         channel_id                       = Dict(json_playlist_details, 'snippet', 'channelId');                               Log.Info('[ ] channel_id: "{}"'.format(channel_id))
         title                            = sanitize_path(Dict(json_playlist_details, 'snippet', 'title'));                    Log.Info('[ ] title:      "{}"'.format(metadata.title))
         if title: metadata.title = title
-        published_at = _safe_parse_date(Dict(json_playlist_details, 'snippet', 'publishedAt'))
+        published_at = safe_parse_date(Dict(json_playlist_details, 'snippet', 'publishedAt'))
         if published_at is not None:  metadata.originally_available_at = published_at.date()
         Log.Info('[ ] publishedAt:  {}'.format(published_at))
         metadata.summary                 = Dict(json_playlist_details, 'snippet', 'description');                             Log.Info('[ ] summary:     "{}"'.format((Dict(json_playlist_details, 'snippet', 'description').replace('\n', '. '))))
@@ -668,7 +672,7 @@ def _update(metadata, media, lang, force, movie):
             video = video_hit[1]
             episode.title                   = sanitize_path(Dict(video, 'snippet', 'title'       ));                                                                  Log.Info(u'[ ] title:        {}'.format(Dict(video, 'snippet', 'title'       )))
             episode.summary                 = sanitize_path(Dict(video, 'snippet', 'description' ));                                                                  Log.Info(u'[ ] description:  {}'.format(Dict(video, 'snippet', 'description' ).replace('\n', '. ')))
-            published_at = _safe_parse_date(Dict(video, 'contentDetails', 'videoPublishedAt') or Dict(video, 'snippet', 'publishedAt'))
+            published_at = safe_parse_date(Dict(video, 'contentDetails', 'videoPublishedAt') or Dict(video, 'snippet', 'publishedAt'))
             if published_at is not None:  episode.originally_available_at = published_at.date()
             Log.Info('[ ] publishedAt:  {}'.format(published_at))
             thumb                           = Dict(video, 'snippet', 'thumbnails', 'maxres', 'url') or Dict(video, 'snippet', 'thumbnails', 'medium', 'url')or Dict(video, 'snippet', 'thumbnails', 'standard', 'url') or Dict(video, 'snippet', 'thumbnails', 'high', 'url') or Dict(video, 'snippet', 'thumbnails', 'default', 'url')
@@ -694,7 +698,7 @@ def _update(metadata, media, lang, force, movie):
               videoId = Dict(json_video_details, 'id')
               Log.Info('# videoId [{}] not in Playlist/channel item list so loading json_video_details'.format(videoId))
               Log.Info('[?] link:     "https://www.youtube.com/watch?v={}"'.format(videoId))
-              thumb, _ = img_load([os.path.dirname(json_file), series_root_folder], filename, info_index['dir_files'])
+              thumb, unused_picture = img_load([os.path.dirname(json_file), series_root_folder], filename, info_index['dir_files'])
               if thumb is not None:
                 if thumb not in episode.thumbs:  #Only read the image when Plex does not have it yet
                   Log.Info(u'[ ] thumbs:   "{}"'.format(thumb))
@@ -709,7 +713,7 @@ def _update(metadata, media, lang, force, movie):
               
               episode.title                   = sanitize_path(Dict(json_video_details, 'title'));            Log.Info(u'[ ] title:    "{}"'.format(Dict(json_video_details, 'title')))
               episode.summary                 = sanitize_path(Dict(json_video_details, 'description'));      Log.Info(u'[ ] summary:  "{}"'.format(Dict(json_video_details, 'description').replace('\n', '. ')))
-              upload_date                     = _safe_parse_date(Dict(json_video_details, 'upload_date'))
+              upload_date                     = safe_parse_date(Dict(json_video_details, 'upload_date'))
               if len(e)>3 and upload_date is not None:  episode.originally_available_at = upload_date.date()
               Log.Info(u'[ ] date:     "{}"'.format(upload_date))
               duration                        = Dict(json_video_details, 'duration')
@@ -742,7 +746,7 @@ def _update(metadata, media, lang, force, movie):
                   thumb                           = Dict(json_video_details, 'snippet', 'thumbnails', 'maxres', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'medium', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'standard', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'high', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'default', 'url')
                   episode.title                   = sanitize_path(json_video_details['snippet']['title']);                                 Log.Info('[ ] title:    "{}"'.format(json_video_details['snippet']['title']))
                   episode.summary                 = sanitize_path(json_video_details['snippet']['description']);                           Log.Info('[ ] summary:  "{}"'.format(json_video_details['snippet']['description'].replace('\n', '. ')))
-                  published_at = _safe_parse_date(Dict(json_video_details, 'snippet', 'publishedAt'))
+                  published_at = safe_parse_date(Dict(json_video_details, 'snippet', 'publishedAt'))
                   if len(e)>3 and published_at is not None:  episode.originally_available_at = published_at.date()
                   Log.Info('[ ] date:     "{}"'.format(published_at))
                   episode.duration                = ISO8601DurationToSeconds(json_video_details['contentDetails']['duration'])*1000;               Log.Info('[ ] duration: "{}"->"{}"'.format(json_video_details['contentDetails']['duration'], episode.duration))
