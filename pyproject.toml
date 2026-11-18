@@ -1,0 +1,22 @@
+# Configuration for the offline test suite and the py3-side tooling.
+# The plugin runtime itself (Contents/) is Python 2.7 and is deliberately
+# excluded from ruff: see devenv.nix and the docstring in tests/conftest.py.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Contents/Code/__init__.py is Python 2 source, so CPython 3 reports its "\d" and
+# "\s" regex escapes as SyntaxWarning every time the file is compiled for a test.
+# The real grammar check is the py27-compat hook; these warnings are only noise.
+filterwarnings = ["ignore::SyntaxWarning"]
+
+[tool.ruff]
+line-length = 100
+# Contents/ is Python 2 source executed by Plex's embedded CPython 2.7.
+# It is gated by the py27-compat git hook instead of ruff.
+extend-exclude = ["Contents"]
+# Apply the exclusion even when Contents/ is passed explicitly on the CLI.
+force-exclude = true
+
+[tool.ruff.lint]
+# The historical ruff default set, plus import sorting.
+select = ["E4", "E7", "E9", "F", "I"]
