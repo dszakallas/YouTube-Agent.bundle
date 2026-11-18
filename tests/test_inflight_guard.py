@@ -133,7 +133,7 @@ def test_different_series_run_concurrently(scenario):
     assert scenario.module._UPDATES_IN_FLIGHT == set()
     assert scenario.call_counts() == {
         "json": 4,
-        "http": 0,
+        "http": 2,  # one remote .info.json thumbnail per series
         "storage": 2,
         "os.walk": 2,
         "os.listdir": 2,

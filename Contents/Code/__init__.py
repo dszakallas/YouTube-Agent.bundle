@@ -151,13 +151,28 @@ def json_load(template, *args):
   #Log.Info(u'total items: {}'.format(len(Dict(json, 'items'))))
   return json
 
-### load image if present in local dir
-def img_load(series_root_folder, filename):
-  Log(u'img_load() - series_root_folder: {}, filename: {}'.format(series_root_folder, filename))
-  for ext in ['jpg', 'jpeg', 'png', 'tiff', 'gif', 'jp2']:
-    filename = os.path.join(series_root_folder, filename.rsplit('.', 1)[0]+"."+ext)
-    if os.path.isfile(filename):  Log(u'local thumbnail found for file %s', filename);  return filename, Core.storage.load(filename)
-  return "", None
+### load image if present next to one of the given directories
+def img_load(directories, filename, dir_files=None):
+  """Return (path, None) for the first local image for filename, else (None, None).
+
+  No image bytes are read here. When dir_files (the {NFC directory: NFC filenames} map from
+  build_info_json_index()) is passed, the probe answers from memory instead of stat()-ing every candidate.
+  """
+  Log(u'img_load() - filename: {}'.format(filename))
+  if isinstance(directories, basestring):  directories = (directories,)
+  base = os.path.splitext(os.path.basename(filename))[0]
+  for directory in directories:
+    if not directory:  continue
+    names = None
+    if dir_files is not None:  names = dir_files.get(unicodedata.normalize('NFC', sanitize_path(directory)))
+    for ext in ['jpg', 'jpeg', 'png', 'tiff', 'gif', 'jp2']:
+      name = base + "." + ext
+      if names is not None:
+        if unicodedata.normalize('NFC', sanitize_path(name)) in names:  path = os.path.join(directory, name);  Log(u'local thumbnail found for file %s', path);  return path, None
+      else:
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):  Log(u'local thumbnail found for file %s', path);  return path, None
+  return None, None
 
 ### get biggest thumbnail available
 def get_thumb(json_video_details):
@@ -434,10 +449,10 @@ def _update(metadata, media, lang, force, movie):
       metadata.duration                = ISO8601DurationToSeconds(json_video_details['contentDetails']['duration'])*1000;             Log(u'series duration:    "{}"->"{}"'.format(json_video_details['contentDetails']['duration'], metadata.duration))
       metadata.genres                  = [YOUTUBE_CATEGORY_ID[id] for id in json_video_details['snippet']['categoryId'].split(',')];  Log(u'genres: '+str([x for x in metadata.genres]))
       metadata.year                    = date.year;                                                                              Log(u'movie year: {}'.format(date.year))
-      thumb                            = json_video_details['snippet']['thumbnails']['default']['url'];                               Log(u'thumb: "{}"'.format(thumb))
+      thumb                            = Dict(json_video_details, 'snippet', 'thumbnails', 'maxres', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'medium', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'standard', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'high', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'default', 'url');  Log(u'thumb: "{}"'.format(thumb))
       if thumb and thumb not in metadata.posters:
         Log(u'poster: "{}"'.format(thumb))
-        metadata.posters[thumb]        = Proxy.Media(HTTP.Request(Dict(json_video_details, 'snippet', 'thumbnails', 'maxres', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'medium', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'standard', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'high', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'default', 'url')).content, sort_order=1)
+        metadata.posters[thumb]        = Proxy.Media(HTTP.Request(thumb).content, sort_order=1)
       if Dict(json_video_details, 'statistics', 'likeCount') and int(json_video_details['statistics']['likeCount']) > 0 and Dict(json_video_details, 'statistics', 'dislikeCount') and int(Dict(json_video_details, 'statistics', 'dislikeCount')) > 0:
         metadata.rating                = float(10*int(json_video_details['statistics']['likeCount'])/(int(json_video_details['statistics']['dislikeCount'])+int(json_video_details['statistics']['likeCount'])));  Log('rating: {}'.format(metadata.rating))
       if Prefs['add_user_as_director']:
@@ -667,14 +682,18 @@ def _update(metadata, media, lang, force, movie):
             videoId = Dict(json_video_details, 'id')
             Log.Info('# videoId [{}] not in Playlist/channel item list so loading json_video_details'.format(videoId))
             Log.Info('[?] link:     "https://www.youtube.com/watch?v={}"'.format(videoId))
-            thumb, picture = img_load(series_root_folder, filename)  #Load locally
-            if thumb is None:
+            thumb, _ = img_load([os.path.dirname(json_file), series_root_folder], filename, info_index['dir_files'])
+            if thumb is not None:
+              if thumb not in episode.thumbs:  #Only read the image when Plex does not have it yet
+                Log.Info(u'[ ] thumbs:   "{}"'.format(thumb))
+                episode.thumbs[thumb] = Proxy.Media(Core.storage.load(thumb), sort_order=1)
+                episode.thumbs.validate_keys([thumb])
+            else:
               thumb = get_thumb(json_video_details)
-              if thumb not in episode.thumbs: picture = HTTP.Request(thumb).content  
-            if thumb and thumb not in episode.thumbs:
-              Log.Info(u'[ ] thumbs:   "{}"'.format(thumb))
-              episode.thumbs[thumb] = Proxy.Media(picture, sort_order=1)
-              episode.thumbs.validate_keys([thumb])
+              if thumb and thumb not in episode.thumbs:
+                Log.Info(u'[ ] thumbs:   "{}"'.format(thumb))
+                episode.thumbs[thumb] = Proxy.Media(HTTP.Request(thumb).content, sort_order=1)
+                episode.thumbs.validate_keys([thumb])
               
             episode.title                   = sanitize_path(Dict(json_video_details, 'title'));            Log.Info(u'[ ] title:    "{}"'.format(Dict(json_video_details, 'title')))
             episode.summary                 = sanitize_path(Dict(json_video_details, 'description'));      Log.Info(u'[ ] summary:  "{}"'.format(Dict(json_video_details, 'description').replace('\n', '. ')))
