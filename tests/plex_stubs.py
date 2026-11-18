@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import threading
 import types
 import urllib.parse
 from pathlib import Path
@@ -97,18 +98,84 @@ class Prefs(dict):
         self.update(overrides)
 
 
+class Calls(object):
+    """Ordered record of the arguments a fake was called with.
+
+    Tests assert exact counts and exact arguments instead of "was called".
+    """
+
+    def __init__(self):
+        self._entries = []
+
+    def record(self, *args, **kwargs):
+        self._entries.append((args, kwargs))
+
+    def __len__(self):
+        return len(self._entries)
+
+    @property
+    def count(self):
+        return len(self._entries)
+
+    @property
+    def entries(self):
+        return list(self._entries)
+
+    def args(self, position=0):
+        """Every call's argument at *position*, in call order."""
+        return tuple(args[position] for args, _ in self._entries)
+
+    def __repr__(self):
+        return "Calls(%d)" % len(self._entries)
+
+
+class CallSpy(object):
+    """Wraps a real callable and records each call's arguments."""
+
+    def __init__(self, func):
+        self.func = func
+        self.calls = Calls()
+
+    def __call__(self, *args, **kwargs):
+        self.calls.record(*args, **kwargs)
+        return self.func(*args, **kwargs)
+
+    @property
+    def count(self):
+        return self.calls.count
+
+    def args(self, position=0):
+        return self.calls.args(position)
+
+    def __repr__(self):
+        return "CallSpy(%r, %d calls)" % (self.func, self.count)
+
+
 class FileStore(object):
-    """Shared stand-in for ``Data.Load`` and ``Core.storage.load``."""
+    """Shared stand-in for ``Data.Load`` and ``Core.storage.load``.
+
+    Pre-seeded values win; otherwise the real file is read, so fixtures can
+    create a library under ``tmp_path`` and have the plugin read it.
+    """
 
     def __init__(self, files=None):
         self.files = {} if files is None else files
-        self.loaded = []
+        self.calls = Calls()
+
+    @property
+    def loaded(self):
+        return list(self.calls.args(0))
 
     def load(self, path):
-        self.loaded.append(path)
+        self.calls.record(path)
         try:
             return self.files[path]
         except KeyError:
+            pass
+        try:
+            with open(path, "rb") as handle:
+                return handle.read()
+        except IOError:
             raise IOError("offline test stub: no such file: %s" % (path,))
 
     Load = load
@@ -137,12 +204,16 @@ class HTTP(object):
     def __init__(self):
         self.CacheTime = CACHE_1MONTH
         self.Headers = {}
-        self.requests = []
+        self.calls = Calls()
         self.responses = {}
         self.clear_cache_calls = 0
 
+    @property
+    def requests(self):
+        return list(self.calls.args(0))
+
     def Request(self, url, **kwargs):
-        self.requests.append(url)
+        self.calls.record(url, **kwargs)
         content = self.responses.get(url, b"stub-thumbnail:" + url.encode("utf-8"))
         return HTTPRequest(url, content)
 
@@ -150,30 +221,76 @@ class HTTP(object):
         self.clear_cache_calls += 1
 
 
+class BlockingHook(object):
+    """Hold ``JSON.ObjectFromURL`` for a matching url until released.
+
+    Used to park a threaded ``Update()`` inside an API call and prove that the
+    rest of the work has not happened yet.
+    """
+
+    def __init__(self, match):
+        self.match = match
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.matched_urls = []
+
+    def __call__(self, url):
+        if self.match not in url:
+            return
+        self.matched_urls.append(url)
+        self.entered.set()
+        if not self.release.wait(timeout=30):
+            raise RuntimeError("offline test stub: blocking hook was never released")
+
+    def __repr__(self):
+        return "BlockingHook(%r)" % (self.match,)
+
+
 class JSON(object):
     """Records API calls and refuses to reach the network unless pre-seeded."""
 
     def __init__(self):
-        self.url_calls = []
+        self.calls = Calls()
         self.responses = {}
-        self.string_calls = []
+        self.responders = []
+        self.before_response = None
+        self.string_calls = Calls()
+
+    @property
+    def url_calls(self):
+        return list(self.calls.args(0))
 
     def ObjectFromURL(self, url):
-        self.url_calls.append(url)
-        try:
+        self.calls.record(url)
+        if self.before_response is not None:
+            self.before_response(url)
+        if url in self.responses:
             return self.responses[url]
-        except KeyError:
-            raise RuntimeError("%s (url: %s)" % (OFFLINE_ERROR, url))
+        for responder in self.responders:
+            payload = responder(url)
+            if payload is not None:
+                return payload
+        raise RuntimeError("%s (url: %s)" % (OFFLINE_ERROR, url))
 
     def ObjectFromString(self, data):
-        self.string_calls.append(data)
+        self.string_calls.record(data)
         return json.loads(data)
 
 
 class Datetime(object):
-    @staticmethod
-    def ParseDate(value):
-        return datetime.datetime.strptime(str(value), "%Y%m%d")
+    """Plex's date parser, covering yt-dlp and YouTube Data API shapes."""
+
+    FORMATS = ("%Y%m%d", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ")
+
+    @classmethod
+    def ParseDate(cls, value):
+        text = str(value)
+        for date_format in cls.FORMATS:
+            try:
+                return datetime.datetime.strptime(text, date_format)
+            except ValueError:
+                continue
+        raise ValueError("offline test stub: unparseable date %r" % (value,))
 
 
 class String(object):
