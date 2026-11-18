@@ -62,13 +62,12 @@ def DeArrow(video_id):
   # DeArrow API recommends using first 4 hash characters.
   url = '{api_url}/api/branding/{hash}'.format(api_url = api_url, hash = hash[:4])
 
-  #HTTP.ClearCache()
-  HTTP.CacheTime = 0
-
   crowd_sourced_title = ''
   
   try:
-    data_json = JSON.ObjectFromURL(url)
+    # cacheTime=0 keeps this request uncached without mutating the process-global
+    # HTTP.CacheTime, which concurrent Update() threads share.
+    data_json = JSON.ObjectFromURL(url, cacheTime=0)
   except:
     Log.Error(u'DeArrow(): Error while loading JSON.ObjectFromURL. URL: '+ url)
 
@@ -79,8 +78,6 @@ def DeArrow(video_id):
   except:
     Log.Info(u'DeArrow(): No Crowd Sourced Title Found for Video ID: ' + video_id)
 
-  HTTP.CacheTime = CACHE_1MONTH
-  
   return crowd_sourced_title
 
 ### Convert ISO8601 Duration format into seconds ###
@@ -208,7 +205,7 @@ def Search(results, media, lang, manual, movie):
   
   displayname = sanitize_path(os.path.basename((media.name if movie else media.show) or "") )
   filename    = media.items[0].parts[0].file if movie else media.filename or media.show
-  dir         = GetMediaDir(media, movie)
+  dir         = GetMediaDir(media, movie) or os.path.dirname(filename or '')  #no episodes yet: fall back to the media file's folder
   try:                    filename = sanitize_path(filename)
   except Exception as e:  Log('search() - Exception1: filename: "{}", e: "{}"'.format(filename, e))
   try:                    filename = os.path.basename(filename)
@@ -233,12 +230,13 @@ def Search(results, media, lang, manual, movie):
   
   if movie:  Log.Info(filename)
   else:    
-    s = media.seasons.keys()[0] if media.seasons.keys()[0]!='0' else media.seasons.keys()[1] if len(media.seasons.keys()) >1 else None
+    seasons = media.seasons.keys() if media and getattr(media, 'seasons', None) else []
+    s = seasons[0] if seasons and seasons[0]!='0' else seasons[1] if len(seasons) >1 else None
     if s:
       result = YOUTUBE_PLAYLIST_REGEX.search(os.path.basename(os.path.dirname(dir)))
       guid   = result.group('id') if result else ''
       if result or os.path.exists(os.path.join(dir, 'youtube.id')):
-        Log(u'search() - filename: "{}", found season YouTube playlist id, result.group("id"): {}'.format(filename, result.group('id')))
+        Log(u'search() - filename: "{}", found season YouTube playlist id, guid: {}'.format(filename, guid))
         safe_id = sanitize_xml_string('youtube|{}|{}'.format(guid,dir))
         results.Append( MetadataSearchResult( id=safe_id, name=filename, year=None, score=100, lang=lang ) )
         Log(u''.ljust(157, '='))
@@ -533,12 +531,6 @@ def _update(metadata, media, lang, force, movie):
         Log.Info('[ ] publishedAt:  {}'.format(published_at))
         metadata.summary                 = Dict(json_playlist_details, 'snippet', 'description');                             Log.Info('[ ] summary:     "{}"'.format((Dict(json_playlist_details, 'snippet', 'description').replace('\n', '. '))))
 
-        if Prefs['use_crowd_sourced_titles'] == True:
-          crowd_sourced_title = DeArrow(guid)
-          if crowd_sourced_title != '':
-            metadata.summary = 'Original Title: ' + metadata.title + '\r\n\r\n' + metadata.summary
-            metadata.title = crowd_sourced_title
-
       Log.Info('[?] json_playlist_items')
       try:                    json_playlist_items = json_load(YOUTUBE_PLAYLIST_ITEMS, guid)
       except Exception as e:  Log.Info('[!] json_playlist_items exception: {}, url: {}'.format(e, YOUTUBE_PLAYLIST_ITEMS.format(guid, 'personal_key')))
@@ -568,12 +560,6 @@ def _update(metadata, media, lang, force, movie):
             summary += u'{} subscribers, '.format(Dict(json_channel_details, 'statistics', 'subscriberCount'))
             summary += u'{} views'.format(Dict(json_channel_details, 'statistics', 'viewCount'))
             metadata.summary = sanitize_path(summary);  Log.Info(u'[ ] summary:     "{}"'.format(summary))  #
-
-        if Prefs['use_crowd_sourced_titles'] == True:
-          crowd_sourced_title = DeArrow(guid)
-          if crowd_sourced_title != '':
-            metadata.summary = 'Original Title: ' + metadata.title + '\r\n\r\n' + metadata.summary
-            metadata.title = crowd_sourced_title
 
         if Dict(json_channel_details,'snippet','country') and Dict(json_channel_details,'snippet','country') not in metadata.countries:
           metadata.countries.add(Dict(json_channel_details,'snippet','country'));  Log.Info('[ ] country: {}'.format(Dict(json_channel_details,'snippet','country') ))
@@ -821,7 +807,7 @@ if os.path.isfile(token_file_path):
   if token_file:  PLEX_LIBRARY_URL += "?X-Plex-Token=" + token_file.strip()
   #Log.Info(PLEX_LIBRARY_URL) ##security risk if posting logs with token displayed
 try:
-  library_xml = etree.fromstring(urllib2.urlopen(PLEX_LIBRARY_URL).read())
+  library_xml = etree.fromstring(urllib2.urlopen(PLEX_LIBRARY_URL, timeout=10).read())
   for library in library_xml.iterchildren('Directory'):
     for path in library.iterchildren('Location'):
       PLEX_LIBRARY[path.get("path")] = library.get("title")
