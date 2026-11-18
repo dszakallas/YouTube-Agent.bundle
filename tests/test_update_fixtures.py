@@ -118,12 +118,12 @@ def test_update_channel_series_offline(scenario):
     stubs = scenario.stubs
 
     # Three API calls (details plus two paged uploads), four image downloads,
-    # four file reads, one walk per episode that needs its .info.json.
+    # four file reads, and one folder walk for both .info.json episodes.
     assert scenario.call_counts() == {
         "json": 3,
         "http": 4,
         "storage": 4,
-        "os.walk": 2,
+        "os.walk": 1,
         "os.listdir": 1,
     }
     assert stubs.json.calls.args() == (
@@ -138,7 +138,7 @@ def test_update_channel_series_offline(scenario):
         str(third.info_json_path),
         local_thumbnail(third, "png"),
     )
-    assert scenario.spies.walk.args() == (str(series.directory), str(series.directory))
+    assert scenario.spies.walk.args() == (str(series.directory),)
     assert scenario.spies.listdir.args() == (str(series.directory),)
 
     # Series level metadata.

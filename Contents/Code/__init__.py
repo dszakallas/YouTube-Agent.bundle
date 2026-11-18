@@ -274,6 +274,62 @@ def update_guard(key):
     with _UPDATE_LOCK:
       _UPDATES_IN_FLIGHT.discard(key)
 
+### Episode matching indexes ############################################################################################################################
+# The episode loop used to walk the series folder for every episode and re-scan every API item for every episode.
+# Both are now indexed once per Update(): the API items by videoId, and the folder's *.info.json files by name.
+VIDEO_ID_LENGTH = 11
+
+class VideoIndex(dict):
+  """videoId -> (position, item). Ids that are not 11 characters are listed for the fallback probe."""
+  def __init__(self):
+    dict.__init__(self)
+    self.odd_length_ids = []
+
+def build_video_index(items):
+  """Index API items by videoId, keeping the first occurrence exactly like a linear scan does."""
+  index = VideoIndex()
+  for position, video in enumerate(items or []):
+    videoId = Dict(video, 'id', 'videoId') or Dict(video, 'snippet', 'resourceId', 'videoId')
+    if not videoId or videoId in index:  continue
+    index[videoId] = (position, video)
+    if len(videoId) != VIDEO_ID_LENGTH:  index.odd_length_ids.append(videoId)
+  return index
+
+def match_video(index, filename):
+  """Return (position, item) for the lowest-position videoId inside filename, or None."""
+  best = None
+  for start in range(len(filename) - VIDEO_ID_LENGTH + 1):
+    hit = index.get(filename[start:start + VIDEO_ID_LENGTH])
+    if hit is not None and (best is None or hit[0] < best[0]):  best = hit
+  odd_ids = getattr(index, 'odd_length_ids', None)
+  if odd_ids is None:  odd_ids = [videoId for videoId in index if len(videoId) != VIDEO_ID_LENGTH]
+  for videoId in odd_ids:
+    hit = index.get(videoId)
+    if hit is not None and videoId in filename and (best is None or hit[0] < best[0]):  best = hit
+  return best
+
+def build_info_json_index(series_root_folder):
+  """Walk the series folder once and index its *.info.json files by NFC basename.
+
+  Returns {'info_files': {nfc name: path}, 'dir_files': {nfc dir: set(names)}, 'top_subfolder_count': n}.
+  Python 2.7 raises TypeError when unicodedata.normalize() is handed byte strings, so every name goes through
+  sanitize_path() first.
+  """
+  index = {'info_files': {}, 'dir_files': {}, 'top_subfolder_count': 0}
+  if not series_root_folder:  return index
+  first = True
+  for walk_root, dirnames, filenames in os.walk(sanitize_path(series_root_folder)):
+    dir_key = unicodedata.normalize('NFC', sanitize_path(walk_root))
+    index['dir_files'][dir_key] = set([unicodedata.normalize('NFC', sanitize_path(name)) for name in filenames])
+    if first:
+      index['top_subfolder_count'] = len(dirnames)
+      first = False
+    for name in filenames:
+      if not name.endswith('.info.json'):  continue
+      key = unicodedata.normalize('NFC', sanitize_path(name))
+      if key not in index['info_files']:  index['info_files'][key] = os.path.join(walk_root, name)
+  return index
+
 ### Download metadata using unique ID ###
 def Update(metadata, media, lang, force, movie):
   # Sanitize metadata.id to prevent XML errors
@@ -567,6 +623,8 @@ def _update(metadata, media, lang, force, movie):
     ### Season + Episode loop ###
     genre_array = {}
     episodes    = 0
+    video_index = build_video_index(Dict(json_playlist_items, 'items') or Dict(json_channel_items, 'items') or [])
+    info_index  = None
 
     for s in sorted(media.seasons, key=natural_sort_key):
       Log.Info(u"".ljust(157, '='))
@@ -578,63 +636,62 @@ def _update(metadata, media, lang, force, movie):
         episodes += 1
         Log.Info('metadata.seasons[{:>2}].episodes[{:>3}] "{}"'.format(s, e, filename))
         
-        for video in Dict(json_playlist_items, 'items') or Dict(json_channel_items, 'items') or {}:
-          
+        video_hit = match_video(video_index, filename)
+        if video_hit is not None:
+
           # videoId in Playlist/channel
-          videoId = Dict(video, 'id', 'videoId') or Dict(video, 'snippet', 'resourceId', 'videoId')
-          if videoId and videoId in filename:
-            episode.title                   = sanitize_path(Dict(video, 'snippet', 'title'       ));                                                                  Log.Info(u'[ ] title:        {}'.format(Dict(video, 'snippet', 'title'       )))
-            episode.summary                 = sanitize_path(Dict(video, 'snippet', 'description' ));                                                                  Log.Info(u'[ ] description:  {}'.format(Dict(video, 'snippet', 'description' ).replace('\n', '. ')))
-            episode.originally_available_at = Datetime.ParseDate(Dict(video, 'contentDetails', 'videoPublishedAt') or Dict(video, 'snippet', 'publishedAt')).date();  Log.Info('[ ] publishedAt:  {}'.format(Dict(video, 'contentDetails', 'videoPublishedAt' )))
-            thumb                           = Dict(video, 'snippet', 'thumbnails', 'maxres', 'url') or Dict(video, 'snippet', 'thumbnails', 'medium', 'url')or Dict(video, 'snippet', 'thumbnails', 'standard', 'url') or Dict(video, 'snippet', 'thumbnails', 'high', 'url') or Dict(video, 'snippet', 'thumbnails', 'default', 'url')
-            if thumb and thumb not in episode.thumbs:  episode.thumbs[thumb] = Proxy.Media(HTTP.Request(thumb).content, sort_order=1);                                Log.Info('[ ] thumbnail:    {}'.format(thumb))
-            Log.Info(u'[ ] channelTitle: {}'.format(Dict(video, 'snippet', 'channelTitle')))
-            break
-        
+          video = video_hit[1]
+          episode.title                   = sanitize_path(Dict(video, 'snippet', 'title'       ));                                                                  Log.Info(u'[ ] title:        {}'.format(Dict(video, 'snippet', 'title'       )))
+          episode.summary                 = sanitize_path(Dict(video, 'snippet', 'description' ));                                                                  Log.Info(u'[ ] description:  {}'.format(Dict(video, 'snippet', 'description' ).replace('\n', '. ')))
+          episode.originally_available_at = Datetime.ParseDate(Dict(video, 'contentDetails', 'videoPublishedAt') or Dict(video, 'snippet', 'publishedAt')).date();  Log.Info('[ ] publishedAt:  {}'.format(Dict(video, 'contentDetails', 'videoPublishedAt' )))
+          thumb                           = Dict(video, 'snippet', 'thumbnails', 'maxres', 'url') or Dict(video, 'snippet', 'thumbnails', 'medium', 'url')or Dict(video, 'snippet', 'thumbnails', 'standard', 'url') or Dict(video, 'snippet', 'thumbnails', 'high', 'url') or Dict(video, 'snippet', 'thumbnails', 'default', 'url')
+          if thumb and thumb not in episode.thumbs:  episode.thumbs[thumb] = Proxy.Media(HTTP.Request(thumb).content, sort_order=1);                                Log.Info('[ ] thumbnail:    {}'.format(thumb))
+          Log.Info(u'[ ] channelTitle: {}'.format(Dict(video, 'snippet', 'channelTitle')))
+
         else:  # videoId not in Playlist/channel item list
 
           #Loading json file if available
           json_filename = filename.rsplit('.', 1)[0] + ".info.json"
           Log.Info(u'populate_episode_metadata_from_info_json() - series_root_folder: {}, filename: {}'.format(series_root_folder, filename))
           Log.Info(u'Searching for "{}". Searching in "{}".'.format(json_filename, series_root_folder))
-          for root, dirnames, filenames in os.walk(series_root_folder):
-            Log.Info(u'Directory {} contains {} files'.format(root, len(filenames)))  #for filename in filenames: Log.Info('File: {}'.format(filename))
-            if json_filename in filenames :
-              json_file = os.path.join(root, json_filename)
-              try:  json_video_details = JSON.ObjectFromString(Core.storage.load(json_file))  #"JSONDecodeError: Unexpected end of input" if empty
-              except: json_video_details = None
-              if json_video_details:
-                Log.Info('Attempting to read metadata from {}'.format(os.path.join(root, json_filename)))
-                videoId = Dict(json_video_details, 'id')
-                Log.Info('# videoId [{}] not in Playlist/channel item list so loading json_video_details'.format(videoId))
-                Log.Info('[?] link:     "https://www.youtube.com/watch?v={}"'.format(videoId))
-                thumb, picture = img_load(series_root_folder, filename)  #Load locally
-                if thumb is None:
-                  thumb = get_thumb(json_video_details)
-                  if thumb not in episode.thumbs: picture = HTTP.Request(thumb).content  
-                if thumb and thumb not in episode.thumbs:
-                  Log.Info(u'[ ] thumbs:   "{}"'.format(thumb))
-                  episode.thumbs[thumb] = Proxy.Media(picture, sort_order=1)
-                  episode.thumbs.validate_keys([thumb])
-                  
-                episode.title                   = sanitize_path(Dict(json_video_details, 'title'));            Log.Info(u'[ ] title:    "{}"'.format(Dict(json_video_details, 'title')))
-                episode.summary                 = sanitize_path(Dict(json_video_details, 'description'));      Log.Info(u'[ ] summary:  "{}"'.format(Dict(json_video_details, 'description').replace('\n', '. ')))
-                if len(e)>3: episode.originally_available_at = Datetime.ParseDate(Dict(json_video_details, 'upload_date')).date();  Log.Info(u'[ ] date:     "{}"'.format(Dict(json_video_details, 'upload_date')))
-                episode.duration                = int(Dict(json_video_details, 'duration'));                           Log.Info(u'[ ] duration: "{}"'.format(episode.duration))
-                if Dict(json_video_details, 'likeCount') and int(Dict(json_video_details, 'like_count')) > 0 and Dict(json_video_details, 'dislike_count') and int(Dict(json_video_details, 'dislike_count')) > 0:
-                  episode.rating                = float(10*int(Dict(json_video_details, 'like_count'))/(int(Dict(json_video_details, 'dislike_count'))+int(Dict(json_video_details, 'like_count'))));  Log('[ ] rating:   "{}"'.format(episode.rating))
-                if channel_title and channel_title not in [role_obj.name for role_obj in episode.directors]:
-                  meta_director      = episode.directors.new()
-                  meta_director.name = sanitize_path(channel_title)
-                  Log.Info(u'[ ] director: "{}"'.format(channel_title))
+          if info_index is None:  #One walk per Update(), never cached across calls
+            info_index = build_info_json_index(series_root_folder)
+            Log.Info(u'Indexed {} info files under "{}"'.format(len(info_index['info_files']), series_root_folder))
+          json_file = info_index['info_files'].get(unicodedata.normalize('NFC', sanitize_path(json_filename))) or ''
+          json_video_details = None
+          if json_file:
+            try:  json_video_details = JSON.ObjectFromString(Core.storage.load(json_file))  #"JSONDecodeError: Unexpected end of input" if empty
+            except: json_video_details = None
+          if json_video_details:
+            Log.Info('Attempting to read metadata from {}'.format(json_file))
+            videoId = Dict(json_video_details, 'id')
+            Log.Info('# videoId [{}] not in Playlist/channel item list so loading json_video_details'.format(videoId))
+            Log.Info('[?] link:     "https://www.youtube.com/watch?v={}"'.format(videoId))
+            thumb, picture = img_load(series_root_folder, filename)  #Load locally
+            if thumb is None:
+              thumb = get_thumb(json_video_details)
+              if thumb not in episode.thumbs: picture = HTTP.Request(thumb).content  
+            if thumb and thumb not in episode.thumbs:
+              Log.Info(u'[ ] thumbs:   "{}"'.format(thumb))
+              episode.thumbs[thumb] = Proxy.Media(picture, sort_order=1)
+              episode.thumbs.validate_keys([thumb])
+              
+            episode.title                   = sanitize_path(Dict(json_video_details, 'title'));            Log.Info(u'[ ] title:    "{}"'.format(Dict(json_video_details, 'title')))
+            episode.summary                 = sanitize_path(Dict(json_video_details, 'description'));      Log.Info(u'[ ] summary:  "{}"'.format(Dict(json_video_details, 'description').replace('\n', '. ')))
+            if len(e)>3: episode.originally_available_at = Datetime.ParseDate(Dict(json_video_details, 'upload_date')).date();  Log.Info(u'[ ] date:     "{}"'.format(Dict(json_video_details, 'upload_date')))
+            episode.duration                = int(Dict(json_video_details, 'duration'));                           Log.Info(u'[ ] duration: "{}"'.format(episode.duration))
+            if Dict(json_video_details, 'likeCount') and int(Dict(json_video_details, 'like_count')) > 0 and Dict(json_video_details, 'dislike_count') and int(Dict(json_video_details, 'dislike_count')) > 0:
+              episode.rating                = float(10*int(Dict(json_video_details, 'like_count'))/(int(Dict(json_video_details, 'dislike_count'))+int(Dict(json_video_details, 'like_count'))));  Log('[ ] rating:   "{}"'.format(episode.rating))
+            if channel_title and channel_title not in [role_obj.name for role_obj in episode.directors]:
+              meta_director      = episode.directors.new()
+              meta_director.name = sanitize_path(channel_title)
+              Log.Info(u'[ ] director: "{}"'.format(channel_title))
 
-                for category  in Dict(json_video_details, 'categories') or []:  genre_array[category] = genre_array[category]+1 if category in genre_array else 1
-                for tag       in Dict(json_video_details, 'tags')       or []:  genre_array[tag     ] = genre_array[tag     ]+1 if tag      in genre_array else 1
-                
-                Log.Info(u'[ ] genres:   "{}"'.format([x for x in metadata.genres]))  #metadata.genres.clear()
-                for id in [id for id in genre_array if genre_array[id]>episodes/2 and id not in metadata.genres]:  metadata.genres.add(id)
-                break
-          
+            for category  in Dict(json_video_details, 'categories') or []:  genre_array[category] = genre_array[category]+1 if category in genre_array else 1
+            for tag       in Dict(json_video_details, 'tags')       or []:  genre_array[tag     ] = genre_array[tag     ]+1 if tag      in genre_array else 1
+            
+            Log.Info(u'[ ] genres:   "{}"'.format([x for x in metadata.genres]))  #metadata.genres.clear()
+            for id in [id for id in genre_array if genre_array[id]>episodes/2 and id not in metadata.genres]:  metadata.genres.add(id)          
           #Loading from API
           else:
             Log(u'populate_episode_metadata_from_api() - filename: {}'.format(filename))
